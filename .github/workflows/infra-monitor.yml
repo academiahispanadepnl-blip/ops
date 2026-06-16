@@ -241,6 +241,7 @@ jobs:
           steps.check_mindfit.outputs.status != 'UP' ||
           steps.check_ibis.outputs.status != 'UP' ||
           steps.sentry.outputs.has_errors == 'true'
+        continue-on-error: true
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
