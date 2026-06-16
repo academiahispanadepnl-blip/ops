@@ -1,8 +1,7 @@
-name: Infra Monitor — Loop Cloud
+name: Infra Monitor — Loop Cloud v2
 
 on:
   schedule:
-    # Runs every 10 minutes, 24/7
     - cron: '*/10 * * * *'
   workflow_dispatch:
     inputs:
@@ -12,120 +11,300 @@ on:
 
 jobs:
   monitor:
-    name: Monitor + Auto-Fix
+    name: Monitor + Auto-Fix + Alert
     runs-on: ubuntu-latest
     permissions:
       issues: write
       contents: read
 
     steps:
+      # ── DEEP HEALTH CHECK: Mindfit ───────────────────────────────────────────
       - name: Check mindfit5 health
         id: check_mindfit
         run: |
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com)
-          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
-          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-            echo "status=UP" >> $GITHUB_OUTPUT
-            echo "mindfit5: UP ($HTTP_CODE)"
-          else
-            echo "status=DOWN" >> $GITHUB_OUTPUT
-            echo "mindfit5: DOWN ($HTTP_CODE)"
+          ROOT_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com)
+          ROOT_TIME=$(curl -s -o /dev/null -w "%{time_total}" --max-time 15 https://mindfit5.academiahispanadepnl.com)
+          LOGIN_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com/login)
+          DASH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com/dashboard)
+
+          echo "http_code=$ROOT_CODE" >> $GITHUB_OUTPUT
+          echo "login_code=$LOGIN_CODE" >> $GITHUB_OUTPUT
+          echo "dash_code=$DASH_CODE" >> $GITHUB_OUTPUT
+          echo "response_time=$ROOT_TIME" >> $GITHUB_OUTPUT
+
+          echo "mindfit5 root: HTTP $ROOT_CODE (${ROOT_TIME}s)"
+          echo "mindfit5 /login: HTTP $LOGIN_CODE"
+          echo "mindfit5 /dashboard: HTTP $DASH_CODE"
+
+          ROOT_OK=false
+          LOGIN_OK=false
+          if [ "$ROOT_CODE" = "200" ] || [ "$ROOT_CODE" = "301" ] || [ "$ROOT_CODE" = "302" ]; then
+            ROOT_OK=true
+          fi
+          if [ "$LOGIN_CODE" = "200" ] || [ "$LOGIN_CODE" = "301" ] || [ "$LOGIN_CODE" = "302" ]; then
+            LOGIN_OK=true
           fi
 
+          # Slow threshold: > 8 seconds = DEGRADED
+          SLOW=$(python3 -c "print('true' if float('$ROOT_TIME') > 8.0 else 'false')" 2>/dev/null || echo 'false')
+
+          if [ "$ROOT_OK" = "false" ]; then
+            echo "status=DOWN" >> $GITHUB_OUTPUT
+            echo "detail=Root no responde (HTTP $ROOT_CODE)" >> $GITHUB_OUTPUT
+          elif [ "$LOGIN_OK" = "false" ]; then
+            echo "status=DEGRADED" >> $GITHUB_OUTPUT
+            echo "detail=Root OK pero /login falla (HTTP $LOGIN_CODE)" >> $GITHUB_OUTPUT
+          elif [ "$SLOW" = "true" ]; then
+            echo "status=SLOW" >> $GITHUB_OUTPUT
+            echo "detail=Respuesta lenta: ${ROOT_TIME}s (umbral 8s)" >> $GITHUB_OUTPUT
+          else
+            echo "status=UP" >> $GITHUB_OUTPUT
+            echo "detail=OK" >> $GITHUB_OUTPUT
+          fi
+
+      # ── DEEP HEALTH CHECK: IBIS ──────────────────────────────────────────────
       - name: Check IBIS health
         id: check_ibis
         run: |
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://ibisapp.academiahispanadepnl.com)
-          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
-          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-            echo "status=UP" >> $GITHUB_OUTPUT
-            echo "IBIS: UP ($HTTP_CODE)"
-          else
-            echo "status=DOWN" >> $GITHUB_OUTPUT
-            echo "IBIS: DOWN ($HTTP_CODE)"
+          ROOT_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://ibisapp.academiahispanadepnl.com)
+          ROOT_TIME=$(curl -s -o /dev/null -w "%{time_total}" --max-time 15 https://ibisapp.academiahispanadepnl.com)
+          LOGIN_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://ibisapp.academiahispanadepnl.com/login)
+
+          echo "http_code=$ROOT_CODE" >> $GITHUB_OUTPUT
+          echo "login_code=$LOGIN_CODE" >> $GITHUB_OUTPUT
+          echo "response_time=$ROOT_TIME" >> $GITHUB_OUTPUT
+
+          echo "IBIS root: HTTP $ROOT_CODE (${ROOT_TIME}s)"
+          echo "IBIS /login: HTTP $LOGIN_CODE"
+
+          ROOT_OK=false
+          LOGIN_OK=false
+          if [ "$ROOT_CODE" = "200" ] || [ "$ROOT_CODE" = "301" ] || [ "$ROOT_CODE" = "302" ]; then
+            ROOT_OK=true
+          fi
+          if [ "$LOGIN_CODE" = "200" ] || [ "$LOGIN_CODE" = "301" ] || [ "$LOGIN_CODE" = "302" ]; then
+            LOGIN_OK=true
           fi
 
+          SLOW=$(python3 -c "print('true' if float('$ROOT_TIME') > 8.0 else 'false')" 2>/dev/null || echo 'false')
+
+          if [ "$ROOT_OK" = "false" ]; then
+            echo "status=DOWN" >> $GITHUB_OUTPUT
+            echo "detail=Root no responde (HTTP $ROOT_CODE)" >> $GITHUB_OUTPUT
+          elif [ "$LOGIN_OK" = "false" ]; then
+            echo "status=DEGRADED" >> $GITHUB_OUTPUT
+            echo "detail=Root OK pero /login falla (HTTP $LOGIN_CODE)" >> $GITHUB_OUTPUT
+          elif [ "$SLOW" = "true" ]; then
+            echo "status=SLOW" >> $GITHUB_OUTPUT
+            echo "detail=Respuesta lenta: ${ROOT_TIME}s (umbral 8s)" >> $GITHUB_OUTPUT
+          else
+            echo "status=UP" >> $GITHUB_OUTPUT
+            echo "detail=OK" >> $GITHUB_OUTPUT
+          fi
+
+      # ── SENTRY ERROR CHECK ───────────────────────────────────────────────────
+      - name: Check Sentry errors
+        id: sentry
+        env:
+          SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+        run: |
+          if [ -z "$SENTRY_TOKEN" ] || [ -z "$SENTRY_ORG" ]; then
+            echo "Sentry no configurado — saltando"
+            echo "has_errors=false" >> $GITHUB_OUTPUT
+            echo "error_count=0" >> $GITHUB_OUTPUT
+            echo "sentry_summary=Sentry no configurado" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Query unresolved error/fatal issues in last 1 hour
+          RESPONSE=$(curl -s -H "Authorization: Bearer $SENTRY_TOKEN" \
+            "https://sentry.io/api/0/organizations/$SENTRY_ORG/issues/?query=is:unresolved+level:error&limit=10&project=mindfit&project=ibis" \
+            2>/dev/null || echo '[]')
+
+          COUNT=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          try:
+            d = json.load(sys.stdin)
+            if isinstance(d, list):
+              print(len(d))
+            else:
+              print(0)
+          except:
+            print(0)
+          ")
+
+          echo "error_count=$COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$COUNT" -gt "0" ]; then
+            echo "has_errors=true" >> $GITHUB_OUTPUT
+            TITLES=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          try:
+            d = json.load(sys.stdin)
+            for i in d[:3]:
+              print('- ' + i.get('title','sin titulo')[:80])
+          except:
+            pass
+            ")
+            echo "sentry_summary<<EOF" >> $GITHUB_OUTPUT
+            echo "$TITLES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "Sentry: $COUNT errores nuevos encontrados"
+          else
+            echo "has_errors=false" >> $GITHUB_OUTPUT
+            echo "sentry_summary=Sin errores nuevos" >> $GITHUB_OUTPUT
+            echo "Sentry: sin errores nuevos"
+          fi
+
+      # ── T1: REDEPLOY MINDFIT SI CAIDO ────────────────────────────────────────
       - name: T1 - Redeploy mindfit5 if DOWN
         id: fix_mindfit
         if: steps.check_mindfit.outputs.status == 'DOWN'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          echo "mindfit5 is DOWN. Attempting T1 redeploy..."
+          echo "mindfit5 DOWN. Iniciando T1 redeploy..."
           PROJECT_ID="prj_I7t1hJAPgIimLounBAUv4CMuk0ic"
 
-          # Get last READY deployment
           LAST_DEPLOY=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=${PROJECT_ID}&state=READY&limit=1" \
             | python3 -c "import json,sys; d=json.load(sys.stdin); deps=d.get('deployments',[]); print(deps[0]['uid'] if deps else 'NONE')")
 
-          echo "Last stable deployment: $LAST_DEPLOY"
+          echo "Ultimo deploy estable: $LAST_DEPLOY"
           echo "last_deploy=$LAST_DEPLOY" >> $GITHUB_OUTPUT
 
           if [ "$LAST_DEPLOY" = "NONE" ]; then
             echo "result=NO_STABLE_DEPLOY" >> $GITHUB_OUTPUT
+            echo "verify=STILL_DOWN" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Trigger redeploy
-          REDEPLOY=$(curl -s -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+          curl -s -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
             -H "Content-Type: application/json" \
             "https://api.vercel.com/v13/deployments" \
-            -d "{\"deploymentId\": \"$LAST_DEPLOY\", \"name\": \"mindfit5.0-app\", \"target\": \"production\"}" \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id','ERROR') + ' ' + d.get('url',''))")
+            -d "{\"deploymentId\": \"$LAST_DEPLOY\", \"name\": \"mindfit5.0-app\", \"target\": \"production\"}"
 
-          echo "Redeploy triggered: $REDEPLOY"
           echo "result=REDEPLOY_TRIGGERED" >> $GITHUB_OUTPUT
-
-          # Wait 90s and verify
           sleep 90
+
           HTTP_AFTER=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com)
-          echo "mindfit5 after redeploy: HTTP $HTTP_AFTER"
+          echo "mindfit5 post-redeploy: HTTP $HTTP_AFTER"
           if [ "$HTTP_AFTER" = "200" ] || [ "$HTTP_AFTER" = "301" ] || [ "$HTTP_AFTER" = "302" ]; then
             echo "verify=OK" >> $GITHUB_OUTPUT
           else
             echo "verify=STILL_DOWN" >> $GITHUB_OUTPUT
           fi
 
+      # ── T1: REDEPLOY IBIS SI CAIDO ───────────────────────────────────────────
       - name: T1 - Redeploy IBIS if DOWN
         id: fix_ibis
         if: steps.check_ibis.outputs.status == 'DOWN'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          echo "IBIS is DOWN. Attempting T1 redeploy..."
+          echo "IBIS DOWN. Iniciando T1 redeploy..."
           PROJECT_ID="prj_POIcFABCSSuZu9ismFyd53Dv0dKj"
 
           LAST_DEPLOY=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v6/deployments?projectId=${PROJECT_ID}&state=READY&limit=1" \
             | python3 -c "import json,sys; d=json.load(sys.stdin); deps=d.get('deployments',[]); print(deps[0]['uid'] if deps else 'NONE')")
 
-          echo "Last stable deployment: $LAST_DEPLOY"
+          echo "Ultimo deploy estable: $LAST_DEPLOY"
           echo "last_deploy=$LAST_DEPLOY" >> $GITHUB_OUTPUT
 
           if [ "$LAST_DEPLOY" = "NONE" ]; then
             echo "result=NO_STABLE_DEPLOY" >> $GITHUB_OUTPUT
+            echo "verify=STILL_DOWN" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          REDEPLOY=$(curl -s -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+          curl -s -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
             -H "Content-Type: application/json" \
             "https://api.vercel.com/v13/deployments" \
-            -d "{\"deploymentId\": \"$LAST_DEPLOY\", \"name\": \"apptermostatoibis\", \"target\": \"production\"}" \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id','ERROR') + ' ' + d.get('url',''))")
+            -d "{\"deploymentId\": \"$LAST_DEPLOY\", \"name\": \"apptermostatoibis\", \"target\": \"production\"}"
 
-          echo "Redeploy triggered: $REDEPLOY"
           echo "result=REDEPLOY_TRIGGERED" >> $GITHUB_OUTPUT
-
           sleep 90
+
           HTTP_AFTER=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://ibisapp.academiahispanadepnl.com)
-          echo "IBIS after redeploy: HTTP $HTTP_AFTER"
+          echo "IBIS post-redeploy: HTTP $HTTP_AFTER"
           if [ "$HTTP_AFTER" = "200" ] || [ "$HTTP_AFTER" = "301" ] || [ "$HTTP_AFTER" = "302" ]; then
             echo "verify=OK" >> $GITHUB_OUTPUT
           else
             echo "verify=STILL_DOWN" >> $GITHUB_OUTPUT
           fi
 
+      # ── T2: EMAIL DIRECTO A GMAIL ────────────────────────────────────────────
+      - name: T2 - Send email alert
+        if: |
+          steps.check_mindfit.outputs.status != 'UP' ||
+          steps.check_ibis.outputs.status != 'UP' ||
+          steps.sentry.outputs.has_errors == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: academiahispanadepnl@gmail.com
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: >-
+            [LOOP MONITOR]
+            Mindfit=${{ steps.check_mindfit.outputs.status }}
+            IBIS=${{ steps.check_ibis.outputs.status }}
+            ${{ steps.sentry.outputs.has_errors == 'true' && '| Sentry: errores' || '' }}
+          to: academiahispanadepnl@gmail.com
+          from: Loop Monitor <academiahispanadepnl@gmail.com>
+          content_type: text/html
+          body: |
+            <html><body style="font-family: sans-serif; padding: 20px;">
+            <h2 style="color: #c0392b;">Alerta del Loop Monitor</h2>
+            <p><strong>Fecha:</strong> ${{ github.run_id }} — ${{ github.event.repository.updated_at }}</p>
+
+            <h3>Estado de servicios</h3>
+            <table style="border-collapse: collapse; width: 100%;">
+              <tr style="background:#f2f2f2;">
+                <th style="padding:8px; border:1px solid #ddd;">Servicio</th>
+                <th style="padding:8px; border:1px solid #ddd;">Estado</th>
+                <th style="padding:8px; border:1px solid #ddd;">Detalle</th>
+              </tr>
+              <tr>
+                <td style="padding:8px; border:1px solid #ddd;">mindfit5</td>
+                <td style="padding:8px; border:1px solid #ddd; color: ${{ steps.check_mindfit.outputs.status == 'UP' && 'green' || 'red' }};">
+                  <strong>${{ steps.check_mindfit.outputs.status }}</strong>
+                </td>
+                <td style="padding:8px; border:1px solid #ddd;">${{ steps.check_mindfit.outputs.detail }}</td>
+              </tr>
+              <tr>
+                <td style="padding:8px; border:1px solid #ddd;">IBIS</td>
+                <td style="padding:8px; border:1px solid #ddd; color: ${{ steps.check_ibis.outputs.status == 'UP' && 'green' || 'red' }};">
+                  <strong>${{ steps.check_ibis.outputs.status }}</strong>
+                </td>
+                <td style="padding:8px; border:1px solid #ddd;">${{ steps.check_ibis.outputs.detail }}</td>
+              </tr>
+            </table>
+
+            ${{ steps.check_mindfit.outputs.status == 'DOWN' && '<h3>Accion T1 — Mindfit</h3><p>Redeploy: ' || '' }}
+            ${{ steps.fix_mindfit.outputs.verify == 'OK' && 'EXITOSO — servicio restaurado.</p>' || '' }}
+            ${{ steps.fix_mindfit.outputs.verify == 'STILL_DOWN' && 'FALLIDO — requiere intervencion manual.</p>' || '' }}
+
+            ${{ steps.check_ibis.outputs.status == 'DOWN' && '<h3>Accion T1 — IBIS</h3><p>Redeploy: ' || '' }}
+            ${{ steps.fix_ibis.outputs.verify == 'OK' && 'EXITOSO — servicio restaurado.</p>' || '' }}
+            ${{ steps.fix_ibis.outputs.verify == 'STILL_DOWN' && 'FALLIDO — requiere intervencion manual.</p>' || '' }}
+
+            ${{ steps.sentry.outputs.has_errors == 'true' && '<h3>Errores en Sentry</h3><pre>' || '' }}
+            ${{ steps.sentry.outputs.has_errors == 'true' && steps.sentry.outputs.sentry_summary || '' }}
+            ${{ steps.sentry.outputs.has_errors == 'true' && '</pre>' || '' }}
+
+            <hr>
+            <p style="color:#888; font-size:12px;">
+              <a href="https://github.com/academiahispanadepnl-blip/ops/actions">Ver logs en GitHub Actions</a>
+              &nbsp;|&nbsp;
+              <a href="https://vercel.com/academiahispanadepnl-blips-projects">Ver Vercel</a>
+            </p>
+            </body></html>
+
+      # ── T3: GITHUB ISSUE SI T1 FALLO ────────────────────────────────────────
       - name: T3 - Create GitHub Issue if T1 failed
         if: |
           (steps.check_mindfit.outputs.status == 'DOWN' && steps.fix_mindfit.outputs.verify == 'STILL_DOWN') ||
@@ -136,20 +315,20 @@ jobs:
         with:
           script: |
             const mindfit_status = '${{ steps.check_mindfit.outputs.status }}';
-            const ibis_status = '${{ steps.check_ibis.outputs.status }}';
-            const mindfit_fix = '${{ steps.fix_mindfit.outputs.verify }}';
-            const ibis_fix = '${{ steps.fix_ibis.outputs.verify }}';
+            const ibis_status    = '${{ steps.check_ibis.outputs.status }}';
+            const mindfit_fix    = '${{ steps.fix_mindfit.outputs.verify }}';
+            const ibis_fix       = '${{ steps.fix_ibis.outputs.verify }}';
 
-            let body = `## Incidente de infraestructura detectado\n\n`;
-            body += `**Fecha/Hora:** ${new Date().toISOString()} UTC\n\n`;
+            let body = `## Incidente de infraestructura — requiere intervencion manual\n\n`;
+            body += `**Timestamp:** ${new Date().toISOString()} UTC\n\n`;
 
             if (mindfit_status === 'DOWN') {
               body += `### mindfit5.academiahispanadepnl.com\n`;
               body += `- Estado: CAIDO\n`;
               body += mindfit_fix === 'OK'
                 ? `- T1 Redeploy: EXITOSO (servicio restaurado)\n`
-                : `- T1 Redeploy: FALLIDO - Requiere intervencion manual\n`;
-              body += `\n`;
+                : `- T1 Redeploy: FALLIDO — requiere intervencion manual\n`;
+              body += `- [Ver Vercel](https://vercel.com/academiahispanadepnl-blips-projects)\n\n`;
             }
 
             if (ibis_status === 'DOWN') {
@@ -157,24 +336,28 @@ jobs:
               body += `- Estado: CAIDO\n`;
               body += ibis_fix === 'OK'
                 ? `- T1 Redeploy: EXITOSO (servicio restaurado)\n`
-                : `- T1 Redeploy: FALLIDO - Requiere intervencion manual\n`;
-              body += `\n`;
+                : `- T1 Redeploy: FALLIDO — requiere intervencion manual\n`;
+              body += `- [Ver Vercel](https://vercel.com/academiahispanadepnl-blips-projects)\n\n`;
             }
 
-            body += `\n**Accion requerida:** Revisar los logs en Vercel y tomar accion manual si el servicio sigue caido.\n`;
-            body += `\n[Ver logs Vercel](https://vercel.com/academiahispanadepnl-blips-projects)`;
+            body += `\n> Email de alerta ya enviado a academiahispanadepnl@gmail.com`;
 
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `[ALERTA] Incidente de infraestructura - ${new Date().toISOString().slice(0,16)} UTC`,
+              title: `[CRITICO] Infraestructura no recuperada — ${new Date().toISOString().slice(0,16)} UTC`,
               body: body,
-              labels: ['infra-alert', 'bug']
+              labels: ['infra-alert', 'critical']
             });
 
-      - name: Summary — all OK
-        if: steps.check_mindfit.outputs.status == 'UP' && steps.check_ibis.outputs.status == 'UP'
+      # ── SUMMARY OK ───────────────────────────────────────────────────────────
+      - name: Summary — all systems OK
+        if: |
+          steps.check_mindfit.outputs.status == 'UP' &&
+          steps.check_ibis.outputs.status == 'UP' &&
+          steps.sentry.outputs.has_errors != 'true'
         run: |
           echo "All systems operational."
-          echo "mindfit5: UP (HTTP ${{ steps.check_mindfit.outputs.http_code }})"
-          echo "IBIS:     UP (HTTP ${{ steps.check_ibis.outputs.http_code }})"
+          echo "  mindfit5 : UP (HTTP ${{ steps.check_mindfit.outputs.http_code }}, ${{ steps.check_mindfit.outputs.response_time }}s)"
+          echo "  IBIS     : UP (HTTP ${{ steps.check_ibis.outputs.http_code }}, ${{ steps.check_ibis.outputs.response_time }}s)"
+          echo "  Sentry   : ${{ steps.sentry.outputs.sentry_summary }}"
