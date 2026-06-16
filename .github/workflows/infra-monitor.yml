@@ -1,0 +1,180 @@
+name: Infra Monitor — Loop Cloud
+
+on:
+  schedule:
+    # Runs every 10 minutes, 24/7
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_check:
+        description: 'Run manual check'
+        default: 'true'
+
+jobs:
+  monitor:
+    name: Monitor + Auto-Fix
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Check mindfit5 health
+        id: check_mindfit
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com)
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+            echo "status=UP" >> $GITHUB_OUTPUT
+            echo "mindfit5: UP ($HTTP_CODE)"
+          else
+            echo "status=DOWN" >> $GITHUB_OUTPUT
+            echo "mindfit5: DOWN ($HTTP_CODE)"
+          fi
+
+      - name: Check IBIS health
+        id: check_ibis
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://ibisapp.academiahispanadepnl.com)
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+            echo "status=UP" >> $GITHUB_OUTPUT
+            echo "IBIS: UP ($HTTP_CODE)"
+          else
+            echo "status=DOWN" >> $GITHUB_OUTPUT
+            echo "IBIS: DOWN ($HTTP_CODE)"
+          fi
+
+      - name: T1 - Redeploy mindfit5 if DOWN
+        id: fix_mindfit
+        if: steps.check_mindfit.outputs.status == 'DOWN'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          echo "mindfit5 is DOWN. Attempting T1 redeploy..."
+          PROJECT_ID="prj_I7t1hJAPgIimLounBAUv4CMuk0ic"
+
+          # Get last READY deployment
+          LAST_DEPLOY=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=${PROJECT_ID}&state=READY&limit=1" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); deps=d.get('deployments',[]); print(deps[0]['uid'] if deps else 'NONE')")
+
+          echo "Last stable deployment: $LAST_DEPLOY"
+          echo "last_deploy=$LAST_DEPLOY" >> $GITHUB_OUTPUT
+
+          if [ "$LAST_DEPLOY" = "NONE" ]; then
+            echo "result=NO_STABLE_DEPLOY" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Trigger redeploy
+          REDEPLOY=$(curl -s -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.vercel.com/v13/deployments" \
+            -d "{\"deploymentId\": \"$LAST_DEPLOY\", \"name\": \"mindfit5.0-app\", \"target\": \"production\"}" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id','ERROR') + ' ' + d.get('url',''))")
+
+          echo "Redeploy triggered: $REDEPLOY"
+          echo "result=REDEPLOY_TRIGGERED" >> $GITHUB_OUTPUT
+
+          # Wait 90s and verify
+          sleep 90
+          HTTP_AFTER=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://mindfit5.academiahispanadepnl.com)
+          echo "mindfit5 after redeploy: HTTP $HTTP_AFTER"
+          if [ "$HTTP_AFTER" = "200" ] || [ "$HTTP_AFTER" = "301" ] || [ "$HTTP_AFTER" = "302" ]; then
+            echo "verify=OK" >> $GITHUB_OUTPUT
+          else
+            echo "verify=STILL_DOWN" >> $GITHUB_OUTPUT
+          fi
+
+      - name: T1 - Redeploy IBIS if DOWN
+        id: fix_ibis
+        if: steps.check_ibis.outputs.status == 'DOWN'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          echo "IBIS is DOWN. Attempting T1 redeploy..."
+          PROJECT_ID="prj_POIcFABCSSuZu9ismFyd53Dv0dKj"
+
+          LAST_DEPLOY=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=${PROJECT_ID}&state=READY&limit=1" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); deps=d.get('deployments',[]); print(deps[0]['uid'] if deps else 'NONE')")
+
+          echo "Last stable deployment: $LAST_DEPLOY"
+          echo "last_deploy=$LAST_DEPLOY" >> $GITHUB_OUTPUT
+
+          if [ "$LAST_DEPLOY" = "NONE" ]; then
+            echo "result=NO_STABLE_DEPLOY" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          REDEPLOY=$(curl -s -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.vercel.com/v13/deployments" \
+            -d "{\"deploymentId\": \"$LAST_DEPLOY\", \"name\": \"apptermostatoibis\", \"target\": \"production\"}" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id','ERROR') + ' ' + d.get('url',''))")
+
+          echo "Redeploy triggered: $REDEPLOY"
+          echo "result=REDEPLOY_TRIGGERED" >> $GITHUB_OUTPUT
+
+          sleep 90
+          HTTP_AFTER=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://ibisapp.academiahispanadepnl.com)
+          echo "IBIS after redeploy: HTTP $HTTP_AFTER"
+          if [ "$HTTP_AFTER" = "200" ] || [ "$HTTP_AFTER" = "301" ] || [ "$HTTP_AFTER" = "302" ]; then
+            echo "verify=OK" >> $GITHUB_OUTPUT
+          else
+            echo "verify=STILL_DOWN" >> $GITHUB_OUTPUT
+          fi
+
+      - name: T3 - Create GitHub Issue if T1 failed
+        if: |
+          (steps.check_mindfit.outputs.status == 'DOWN' && steps.fix_mindfit.outputs.verify == 'STILL_DOWN') ||
+          (steps.check_ibis.outputs.status == 'DOWN' && steps.fix_ibis.outputs.verify == 'STILL_DOWN') ||
+          (steps.check_mindfit.outputs.status == 'DOWN' && steps.fix_mindfit.outputs.result == 'NO_STABLE_DEPLOY') ||
+          (steps.check_ibis.outputs.status == 'DOWN' && steps.fix_ibis.outputs.result == 'NO_STABLE_DEPLOY')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const mindfit_status = '${{ steps.check_mindfit.outputs.status }}';
+            const ibis_status = '${{ steps.check_ibis.outputs.status }}';
+            const mindfit_fix = '${{ steps.fix_mindfit.outputs.verify }}';
+            const ibis_fix = '${{ steps.fix_ibis.outputs.verify }}';
+
+            let body = `## Incidente de infraestructura detectado\n\n`;
+            body += `**Fecha/Hora:** ${new Date().toISOString()} UTC\n\n`;
+
+            if (mindfit_status === 'DOWN') {
+              body += `### mindfit5.academiahispanadepnl.com\n`;
+              body += `- Estado: CAIDO\n`;
+              body += mindfit_fix === 'OK'
+                ? `- T1 Redeploy: EXITOSO (servicio restaurado)\n`
+                : `- T1 Redeploy: FALLIDO - Requiere intervencion manual\n`;
+              body += `\n`;
+            }
+
+            if (ibis_status === 'DOWN') {
+              body += `### ibisapp.academiahispanadepnl.com\n`;
+              body += `- Estado: CAIDO\n`;
+              body += ibis_fix === 'OK'
+                ? `- T1 Redeploy: EXITOSO (servicio restaurado)\n`
+                : `- T1 Redeploy: FALLIDO - Requiere intervencion manual\n`;
+              body += `\n`;
+            }
+
+            body += `\n**Accion requerida:** Revisar los logs en Vercel y tomar accion manual si el servicio sigue caido.\n`;
+            body += `\n[Ver logs Vercel](https://vercel.com/academiahispanadepnl-blips-projects)`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[ALERTA] Incidente de infraestructura - ${new Date().toISOString().slice(0,16)} UTC`,
+              body: body,
+              labels: ['infra-alert', 'bug']
+            });
+
+      - name: Summary — all OK
+        if: steps.check_mindfit.outputs.status == 'UP' && steps.check_ibis.outputs.status == 'UP'
+        run: |
+          echo "All systems operational."
+          echo "mindfit5: UP (HTTP ${{ steps.check_mindfit.outputs.http_code }})"
+          echo "IBIS:     UP (HTTP ${{ steps.check_ibis.outputs.http_code }})"
