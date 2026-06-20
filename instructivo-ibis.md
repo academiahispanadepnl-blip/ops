@@ -94,6 +94,25 @@ WHERE user_id = '<uuid del paso anterior>';
 
 Si el paso 2 no devuelve filas, o devuelve `status != 'active'`, ese es el problema.
 
+### Fix: insertar suscripción manualmente
+
+Cuando el paso 2 devuelve 0 filas, correr esto en el SQL Editor reemplazando los valores:
+
+```sql
+INSERT INTO public.subscriptions (user_id, email, status, plan, expires_at)
+VALUES (
+  '<uuid del usuario>',
+  '<email del usuario>',
+  'active',
+  'basic',
+  NULL  -- NULL = sin vencimiento. Si tiene fecha: '2027-06-20'
+);
+```
+
+Después del INSERT, el usuario recarga la app y ve la biblioteca completa con los audios.
+
+**Caso real resuelto (2026-06-20):** `leoforonda7@gmail.com` — se registró, confirmó el email, pero el webhook de Hotmart no creó su fila en `subscriptions`. Biblioteca vacía y audios sin reproducir. Fix: INSERT con `status = 'active'`, `plan = 'basic'`, `expires_at = NULL`. Resuelto al instante.
+
 ---
 
 ## Acceso directo al SQL Editor
