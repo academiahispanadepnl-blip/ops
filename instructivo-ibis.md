@@ -2,8 +2,6 @@
 
 Cuando tengas un problema, copialo, completá los campos y pegalo al inicio de la sesión con Claude.
 
----
-
 ## Plantilla de reporte
 
 ```
@@ -16,8 +14,8 @@ REPO: github.com/academiahispanadepnl-blip/apptermostatoibis
 Tipo de problema (marcá uno):
 [ ] Usuario no puede entrar / login
 [ ] Biblioteca vacía (técnicas no aparecen)
-[ ] Audios no se reproducen
-[ ] Diagnóstico no funciona o no aparece
+[ ] Audio no se reproduce
+[ ] Diagnóstico no funciona
 [ ] Suscripción pagada pero app no la reconoce
 [ ] Pantalla rota o en blanco
 [ ] Otro: _______________
@@ -31,9 +29,8 @@ Tipo de problema (marcá uno):
 
 ¿A quién le pasa?
 [ ] A todos los usuarios
-[ ] A un usuario específico: _______________ (correo)
 [ ] Solo a usuarios nuevos
-[ ] Solo a usuarios con cierto plan: _______________
+[ ] A un usuario específico: _______________ (correo)
 
 ¿Hay algún mensaje de error visible?
 (Copialo textual si podés)
@@ -50,77 +47,24 @@ Tipo de problema (marcá uno):
 [ ] Ambos
 ```
 
----
-
 ## Qué hace Claude con eso
 
 Con esa info puedo ir directo al archivo correcto sin preguntarte nada extra:
 
 | Problema | Dónde miro primero |
 |---|---|
-| Login roto | `auth.users`, `auth.identities`, configuración de Supabase Auth |
-| Biblioteca vacía / técnicas no aparecen | RLS de `tecnicas`, registro en `subscriptions` del usuario |
-| Audios no se reproducen | Bucket de storage, URL de audio en `tecnicas`, permisos de bucket |
-| Diagnóstico no funciona | Lógica de diagnóstico en el frontend, RLS, datos del usuario en Supabase |
+| Login roto | `auth.users`, `auth.identities`, Supabase Auth |
+| Biblioteca vacía / audio no reproduce | `public.subscriptions` del usuario — casi siempre falta la fila o `status != 'active'` |
+| Diagnóstico no funciona | RLS de `tecnicas`, suscripción activa, lógica de diagnóstico en frontend |
 | Suscripción no reconocida | `public.subscriptions` — columnas `status`, `expires_at`, `hotmart_subscription_id` |
-| Pantalla en blanco | Consola del browser, App.tsx, rutas, error de carga inicial |
+| Pantalla en blanco | Consola del browser, App.tsx, rutas |
 
----
+## La regla de oro de IBis
 
-## La regla de oro de IBis: sin suscripción activa, la app queda vacía
-
-La política RLS de `tecnicas` bloquea TODO el contenido si el usuario no tiene una fila en `subscriptions` con `status = 'active'` y `expires_at` en el futuro (o nulo). Aunque el usuario haya pagado en Hotmart, si el webhook no creó esa fila, ve la app vacía.
-
-**Consulta de diagnóstico rápido** (pegar en el SQL Editor de Supabase):
-
-```sql
--- 1. Verificar cuenta
-SELECT id, email, created_at, last_sign_in_at, confirmed_at,
-  raw_app_meta_data->>'providers' as providers
-FROM auth.users
-WHERE email = '<email del usuario>';
-
--- 2. Verificar suscripción
-SELECT id, user_id, status, plan, hotmart_subscription_id,
-  email, expires_at, created_at, updated_at
-FROM public.subscriptions
-WHERE email = '<email del usuario>'
-   OR user_id = '<uuid del paso anterior>';
-
--- 3. Verificar rol
-SELECT * FROM public.user_roles
-WHERE user_id = '<uuid del paso anterior>';
-```
-
-Si el paso 2 no devuelve filas, o devuelve `status != 'active'`, ese es el problema.
-
-### Fix: insertar suscripción manualmente
-
-Cuando el paso 2 devuelve 0 filas, correr esto en el SQL Editor reemplazando los valores:
-
-```sql
-INSERT INTO public.subscriptions (user_id, email, status, plan, expires_at)
-VALUES (
-  '<uuid del usuario>',
-  '<email del usuario>',
-  'active',
-  'basic',
-  NULL  -- NULL = sin vencimiento. Si tiene fecha: '2027-06-20'
-);
-```
-
-Después del INSERT, el usuario recarga la app y ve la biblioteca completa con los audios.
-
-**Caso real resuelto (2026-06-20):** `leoforonda7@gmail.com` — se registró, confirmó el email, pero el webhook de Hotmart no creó su fila en `subscriptions`. Biblioteca vacía y audios sin reproducir. Fix: INSERT con `status = 'active'`, `plan = 'basic'`, `expires_at = NULL`. Resuelto al instante.
-
----
-
-## Acceso directo al SQL Editor
-
-[Abrir SQL Editor de IBis](https://supabase.com/dashboard/project/kocwthridqvymybedttn/sql/new) *(sesión de Chrome ya autenticada)*
-
----
+Si un usuario ve la biblioteca vacía o los audios no cargan, **casi siempre es porque no tiene fila en `public.subscriptions` con `status = 'active'`**. El webhook de Hotmart a veces no llega. El fix es insertar la fila manualmente en el SQL Editor de Supabase.
 
 ## Una sola cosa extra que acelera todo
 
 Si podés, antes de pegar la plantilla, abrí el browser en la app, hacé clic derecho → **Inspeccionar** → pestaña **Console**, y si hay texto rojo copialo también. Eso me da el error exacto en segundos.
+
+Eso es todo. Sin ese instructivo una sesión de diagnóstico empieza a ciegas y perdemos 15 minutos reconstruyendo contexto. Con esto empezamos directo en el problema.
